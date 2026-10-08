@@ -1,0 +1,52 @@
+# Operating system files
+
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE / editor files
+
+.vscode/
+.idea/
+
+# Environment / secrets
+
+.env
+.env.*
+!.env.example
+
+# Logs
+
+*.log
+
+# Temporary files
+
+*.tmp
+*.temp
+
+# Build output
+
+build/
+dist/
+out/
+
+# Python
+
+**pycache**/
+*.py[cod]
+.venv/
+venv/
+
+# Node
+
+node_modules/
+
+# Local AI / model files
+
+models/
+*.gguf
+
+# NorthStar local data
+
+.local/
+.cache/
