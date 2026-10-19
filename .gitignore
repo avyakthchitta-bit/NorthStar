@@ -1,3 +1,4 @@
+
 # Operating system files
 
 .DS_Store
@@ -32,7 +33,7 @@ out/
 
 # Python
 
-**pycache**/
+__pycache__/
 *.py[cod]
 .venv/
 venv/
@@ -50,3 +51,4 @@ models/
 
 .local/
 .cache/
+projects.json
