@@ -52,3 +52,4 @@ models/
 .local/
 .cache/
 projects.json
+settings.json
