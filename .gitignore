@@ -53,3 +53,4 @@ models/
 .cache/
 projects.json
 settings.json
+project_metadata.json

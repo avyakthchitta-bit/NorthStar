@@ -1,4 +1,8 @@
 {
     "orbital_instability": true,
-    "instability_interval": 15
+    "instability_interval": 15,
+    "accent_color": "#65E8D0",
+    "starfield": true,
+    "show_labels": false,
+    "reduce_motion": false
 }

@@ -2,34 +2,24 @@
 import tkinter as tk
 import math
 import random
+import time
 
 from pathlib import Path
 
 
-BG = "#0b1020"
-TEXT = "#e6edf7"
-MUTED = "#8da2c0"
-ACCENT = "#66e3c4"
+BG = "#0A1221"
+TEXT = "#E8F0FC"
+MUTED = "#8295B2"
+ACCENT = "#65E8D0"
+PURPLE = "#A994FF"
+AMBER = "#FFBD69"
 
-PLANET_COLORS = [
-    "#66aaff",
-    "#b9a0ff",
-    "#ffbd69",
-    "#ff7e9d",
-    "#65dbc5",
-]
+FRAME_TIME = 16
 
-FRAME_TIME = 30
-
-INCOMING_TIME = 0.55
-INSERTION_TIME = 3.0
-
-RECOVERY_DECAY_TIME = 2.8
-RECOVERY_BOOST_TIME = 1.8
-
-EJECTION_LOCK_TIME = 1.4
-EJECTION_SPIRAL_TIME = 1.8
-EJECTION_LAUNCH_TIME = 1.0
+INCOMING_TIME = 0.7
+INSERTION_TIME = 2.2
+EJECTION_TIME = 1.8
+RECOVERY_TIME = 2.0
 
 
 class OrbitView(tk.Canvas):
@@ -40,6 +30,10 @@ class OrbitView(tk.Canvas):
         on_select=None,
         instability_enabled=True,
         instability_interval=60,
+        show_labels=True,
+        starfield_enabled=True,
+        reduce_motion=False,
+        accent_color=ACCENT,
         **kwargs
     ):
 
@@ -50,21 +44,35 @@ class OrbitView(tk.Canvas):
             **kwargs
         )
 
-        self.planets = []
-        self.selected_path = None
-        self.hovered_path = None
         self.on_select = on_select
 
-        self.active_animation = None
+        self.planets = []
+        self.metadata_map = {}
+
+        self.selected_path = None
+        self.hovered_path = None
+
         self.animation_queue = []
+        self.active_animation = None
+        self.emergency = None
 
         self.instability_enabled = instability_enabled
-        self.instability_interval = instability_interval
+        self.instability_interval = max(
+            15,
+            min(120, int(instability_interval))
+        )
+
+        self.show_labels = show_labels
+        self.starfield_enabled = starfield_enabled
+        self.reduce_motion = reduce_motion
+        self.accent_color = accent_color
 
         self.random_generator = random.Random()
-        self.anomaly_timer = self.next_anomaly_time()
+        self.stars = []
+        self.decorations = []
 
-        self.emergency = None
+        self.last_frame = time.perf_counter()
+        self.anomaly_timer = self.next_anomaly_time()
 
         self.bind("<Configure>", self.draw_system)
         self.bind("<Button-1>", self.handle_click)
@@ -74,12 +82,12 @@ class OrbitView(tk.Canvas):
         self.animate()
 
     # --------------------------------------------------
-    # GENERAL HELPERS
+    # MATH AND COLOR HELPERS
     # --------------------------------------------------
 
     @staticmethod
-    def clamp(value, minimum=0.0, maximum=1.0):
-        return max(minimum, min(maximum, value))
+    def clamp(value, low=0.0, high=1.0):
+        return max(low, min(high, value))
 
     @staticmethod
     def lerp(a, b, t):
@@ -91,12 +99,33 @@ class OrbitView(tk.Canvas):
 
     @staticmethod
     def ease_in_out(t):
-        return 3 * t ** 2 - 2 * t ** 3
+        return t * t * (3 - 2 * t)
 
     @staticmethod
-    def exponential_curve(t):
-        k = 4.5
-        return (1 - math.exp(-k * t)) / (1 - math.exp(-k))
+    def hex_rgb(color):
+
+        color = color.lstrip("#")
+
+        return (
+            int(color[0:2], 16),
+            int(color[2:4], 16),
+            int(color[4:6], 16)
+        )
+
+    @classmethod
+    def blend(cls, color_a, color_b, amount):
+
+        amount = cls.clamp(amount)
+
+        a = cls.hex_rgb(color_a)
+        b = cls.hex_rgb(color_b)
+
+        result = tuple(
+            int(cls.lerp(a[i], b[i], amount))
+            for i in range(3)
+        )
+
+        return "#{:02X}{:02X}{:02X}".format(*result)
 
     def next_anomaly_time(self):
 
@@ -105,10 +134,18 @@ class OrbitView(tk.Canvas):
             self.instability_interval * 1.35
         )
 
+    # --------------------------------------------------
+    # SETTINGS
+    # --------------------------------------------------
+
     def set_instability_settings(self, enabled, interval):
 
         self.instability_enabled = bool(enabled)
-        self.instability_interval = max(15, min(120, int(interval)))
+
+        self.instability_interval = max(
+            15,
+            min(120, int(interval))
+        )
 
         self.anomaly_timer = self.next_anomaly_time()
 
@@ -117,6 +154,106 @@ class OrbitView(tk.Canvas):
 
         self.draw_system()
 
+    def set_visual_settings(
+        self,
+        show_labels=None,
+        starfield_enabled=None,
+        reduce_motion=None,
+        accent_color=None
+    ):
+
+        if show_labels is not None:
+            self.show_labels = bool(show_labels)
+
+        if starfield_enabled is not None:
+            self.starfield_enabled = bool(starfield_enabled)
+
+        if reduce_motion is not None:
+            self.reduce_motion = bool(reduce_motion)
+
+        if accent_color is not None:
+            self.accent_color = accent_color
+
+        self.draw_system()
+
+    # --------------------------------------------------
+    # PROJECT METADATA
+    # --------------------------------------------------
+
+    def set_project_metadata(self, metadata_map):
+
+        self.metadata_map = metadata_map or {}
+
+        for planet in self.planets:
+            self.apply_metadata(planet)
+
+        if self.active_animation:
+            self.apply_metadata(
+                self.active_animation["planet"]
+            )
+
+        for animation in self.animation_queue:
+            self.apply_metadata(animation["planet"])
+
+        if self.emergency:
+            self.apply_metadata(self.emergency["planet"])
+
+        self.draw_system()
+
+    def update_project_metadata(self, path, metadata):
+
+        normalized = str(Path(path).resolve())
+
+        self.metadata_map[normalized] = metadata
+
+        for planet in self.planets:
+            if planet["path"] == normalized:
+                self.apply_metadata(planet)
+
+        if self.active_animation:
+            planet = self.active_animation["planet"]
+            if planet["path"] == normalized:
+                self.apply_metadata(planet)
+
+        for animation in self.animation_queue:
+            planet = animation["planet"]
+            if planet["path"] == normalized:
+                self.apply_metadata(planet)
+
+        if self.emergency:
+            planet = self.emergency["planet"]
+            if planet["path"] == normalized:
+                self.apply_metadata(planet)
+
+        self.draw_system()
+
+    def apply_metadata(self, planet):
+
+        metadata = self.metadata_map.get(
+            planet["path"],
+            {}
+        )
+
+        planet["name"] = metadata.get(
+            "display_name",
+            Path(planet["path"]).name
+        )
+
+        planet["color"] = metadata.get(
+            "color",
+            ACCENT
+        )
+
+        planet["icon"] = metadata.get(
+            "icon",
+            "◇"
+        )
+
+        planet["project_type"] = metadata.get(
+            "project_type",
+            "Other"
+        )
+
     # --------------------------------------------------
     # PLANET DATA
     # --------------------------------------------------
@@ -124,28 +261,43 @@ class OrbitView(tk.Canvas):
     def create_planet_data(self, project_path, index):
 
         path = str(Path(project_path).resolve())
+
         ring = index % 5
 
-        return {
+        planet = {
             "path": path,
             "name": Path(path).name,
+            "icon": "◇",
+            "project_type": "Other",
             "ring": ring,
-            "angle": 0.0,
-            "speed": 1.5 / (ring + 1),
-            "color": PLANET_COLORS[index % len(PLANET_COLORS)]
+            "angle": (index * 137.5) % 360,
+            "speed": 0.28 / (ring + 1),
+            "color": ACCENT
         }
+
+        self.apply_metadata(planet)
+
+        return planet
 
     def get_orbit_radius(self, planet, max_radius):
 
         return max_radius * (
-            0.30 + 0.14 * planet["ring"]
+            0.25 + 0.135 * planet["ring"]
         )
 
     def get_orbit_position(
-        self, planet, cx, cy, max_radius
+        self,
+        planet,
+        cx,
+        cy,
+        max_radius
     ):
 
-        radius = self.get_orbit_radius(planet, max_radius)
+        radius = self.get_orbit_radius(
+            planet,
+            max_radius
+        )
+
         angle = math.radians(planet["angle"])
 
         return (
@@ -164,38 +316,6 @@ class OrbitView(tk.Canvas):
             for planet in self.planets
         }
 
-        updated = []
-
-        for index, project_path in enumerate(project_paths):
-
-            path = str(Path(project_path).resolve())
-
-            if path in existing:
-                updated.append(existing[path])
-            else:
-                updated.append(
-                    self.create_planet_data(path, index)
-                )
-
-        self.planets = updated
-
-        valid_paths = {
-            planet["path"] for planet in updated
-        }
-
-        if self.selected_path not in valid_paths:
-            self.selected_path = None
-
-        self.draw_system()
-
-    def add_project_animated(self, project_path):
-
-        path = str(Path(project_path).resolve())
-
-        existing = {
-            planet["path"] for planet in self.planets
-        }
-
         pending = set()
 
         if self.active_animation:
@@ -206,10 +326,72 @@ class OrbitView(tk.Canvas):
         for animation in self.animation_queue:
             pending.add(animation["planet"]["path"])
 
-        if path in existing or path in pending:
+        updated = []
+
+        for index, project_path in enumerate(project_paths):
+
+            path = str(Path(project_path).resolve())
+
+            if path in existing:
+
+                planet = existing[path]
+                self.apply_metadata(planet)
+                updated.append(planet)
+
+            elif path in pending:
+
+                # A planet already being captured must not
+                # be added a second time.
+
+                continue
+
+            else:
+
+                updated.append(
+                    self.create_planet_data(path, index)
+                )
+
+        self.planets = updated
+
+        valid = {
+            planet["path"]
+            for planet in self.planets
+        }
+
+        if self.selected_path not in valid:
+            self.selected_path = None
+
+        self.draw_system()
+
+    def add_project_animated(self, project_path):
+
+        path = str(Path(project_path).resolve())
+
+        known = {
+            planet["path"]
+            for planet in self.planets
+        }
+
+        if path in known:
             return
 
-        index = len(self.planets) + len(pending)
+        if (
+            self.active_animation
+            and self.active_animation["planet"]["path"] == path
+        ):
+            return
+
+        if any(
+            item["planet"]["path"] == path
+            for item in self.animation_queue
+        ):
+            return
+
+        index = len(self.planets) + len(self.animation_queue)
+
+        if self.active_animation:
+            index += 1
+
         planet = self.create_planet_data(path, index)
 
         self.animation_queue.append({
@@ -231,16 +413,29 @@ class OrbitView(tk.Canvas):
 
         planet = next(
             (
-                p for p in self.planets
-                if p["path"] == path
+                item for item in self.planets
+                if item["path"] == path
             ),
             None
         )
 
+        # Cancel a queued capture if it hasn't started.
+        self.animation_queue = [
+            item for item in self.animation_queue
+            if item["planet"]["path"] != path
+        ]
+
         if planet is None:
+
+            if (
+                self.active_animation
+                and self.active_animation["planet"]["path"] == path
+            ):
+                self.active_animation = None
+                self.start_next_animation()
+
             return
 
-        # Cancel an instability event if this planet is its target.
         if (
             self.emergency
             and self.emergency["planet"]["path"] == path
@@ -255,7 +450,7 @@ class OrbitView(tk.Canvas):
         self.animation_queue.append({
             "kind": "ejection",
             "planet": planet,
-            "phase": "ejection_lock",
+            "phase": "ejection",
             "progress": 0.0,
             "start_angle": planet["angle"],
             "trail": []
@@ -285,61 +480,72 @@ class OrbitView(tk.Canvas):
 
             planet = animation["planet"]
 
-            planet["angle"] = animation["end_angle"]
+            planet["angle"] = animation.get(
+                "end_angle",
+                planet["angle"]
+            )
 
-            self.planets.append(planet)
+            if not any(
+                item["path"] == planet["path"]
+                for item in self.planets
+            ):
+                self.planets.append(planet)
+
             self.selected_path = planet["path"]
 
             if self.on_select:
                 self.on_select(planet["path"])
 
-        # Ejection simply finishes: its planet is already removed.
-
         self.active_animation = None
         self.start_next_animation()
 
     # --------------------------------------------------
-    # INTERACTION
+    # INPUT
     # --------------------------------------------------
+
+    def get_project_tag(self, event):
+
+        items = self.find_overlapping(
+            event.x - 3,
+            event.y - 3,
+            event.x + 3,
+            event.y + 3
+        )
+
+        for item in reversed(items):
+
+            for tag in self.gettags(item):
+
+                if tag.startswith("project:"):
+                    return tag[len("project:"):]
+
+        return None
 
     def handle_click(self, event):
 
-        item = self.find_closest(event.x, event.y)
+        path = self.get_project_tag(event)
 
-        if not item:
-            return
+        if path:
 
-        for tag in self.gettags(item[0]):
+            self.selected_path = path
 
-            if tag.startswith("project:"):
+            if self.on_select:
+                self.on_select(path)
 
-                path = tag[len("project:"):]
-
-                self.selected_path = path
-
-                if self.on_select:
-                    self.on_select(path)
-
-                self.draw_system()
-                return
+            self.draw_system()
 
     def handle_hover(self, event):
 
-        item = self.find_closest(event.x, event.y)
-        hovered = None
-
-        if item:
-
-            for tag in self.gettags(item[0]):
-
-                if tag.startswith("project:"):
-                    hovered = tag[len("project:"):]
-                    break
+        hovered = self.get_project_tag(event)
 
         if hovered != self.hovered_path:
 
             self.hovered_path = hovered
-            self.configure(cursor="hand2" if hovered else "")
+
+            self.configure(
+                cursor="hand2" if hovered else ""
+            )
+
             self.draw_system()
 
     def clear_hover(self, event=None):
@@ -349,8 +555,148 @@ class OrbitView(tk.Canvas):
         self.draw_system()
 
     # --------------------------------------------------
+    # BACKGROUND
+    # --------------------------------------------------
+
+    def ensure_background_objects(self, width, height):
+
+        count = max(50, int(width * height / 6500))
+
+        if len(self.stars) == count:
+            return
+
+        self.stars = []
+
+        for _ in range(count):
+
+            self.stars.append({
+                "x": self.random_generator.random() * width,
+                "y": self.random_generator.random() * height,
+                "size": self.random_generator.choice([1, 1, 1, 2]),
+                "brightness": self.random_generator.random()
+            })
+
+        self.decorations = []
+
+        for _ in range(7):
+
+            self.decorations.append({
+                "x": self.random_generator.random() * width,
+                "y": self.random_generator.random() * height,
+                "radius": self.random_generator.randint(30, 85)
+            })
+
+    def draw_background(self, width, height):
+
+        self.create_rectangle(
+            0, 0, width, height,
+            fill=BG,
+            outline=""
+        )
+
+        if not self.starfield_enabled:
+            return
+
+        self.ensure_background_objects(width, height)
+
+        # Distant nebula-like circles.
+        for item in self.decorations:
+
+            x = item["x"]
+            y = item["y"]
+            r = item["radius"]
+
+            self.create_oval(
+                x - r,
+                y - r,
+                x + r,
+                y + r,
+                fill="#0D1B2D",
+                outline=""
+            )
+
+        for star in self.stars:
+
+            brightness = star["brightness"]
+
+            color = (
+                "#344963"
+                if brightness < 0.35
+                else "#536B87"
+                if brightness < 0.75
+                else "#8BA5C4"
+            )
+
+            size = star["size"]
+
+            self.create_oval(
+                star["x"] - size,
+                star["y"] - size,
+                star["x"] + size,
+                star["y"] + size,
+                fill=color,
+                outline=""
+            )
+
+    # --------------------------------------------------
     # DRAWING HELPERS
     # --------------------------------------------------
+
+    def draw_orbit(self, cx, cy, radius, active=False):
+
+        color = (
+            self.blend("#243650", self.accent_color, 0.25)
+            if active
+            else "#20314A"
+        )
+
+        self.create_oval(
+            cx - radius,
+            cy - radius,
+            cx + radius,
+            cy + radius,
+            outline=color,
+            width=2 if active else 1
+        )
+
+        # Small orbital marker.
+        if active:
+            self.create_oval(
+                cx - radius - 2,
+                cy - radius - 2,
+                cx - radius + 2,
+                cy - radius + 2,
+                fill=self.accent_color,
+                outline=""
+            )
+
+    def draw_glow(self, x, y, color, radius):
+
+        layers = [
+            (2.4, 0.10),
+            (1.9, 0.17),
+            (1.45, 0.27),
+            (1.15, 0.42)
+        ]
+
+        for scale, blend_amount in layers:
+
+            r = radius * scale
+
+            glow_color = self.blend(
+                BG,
+                color,
+                blend_amount
+            )
+
+            self.create_oval(
+                x - r,
+                y - r,
+                x + r,
+                y + r,
+                fill=glow_color,
+                outline=""
+            )
 
     def draw_planet(
         self,
@@ -362,63 +708,245 @@ class OrbitView(tk.Canvas):
         tags=()
     ):
 
-        size = 10
+        color = planet["color"]
+        size = 9
 
         if selected or hovered:
 
-            outline = ACCENT if selected else MUTED
-
-            self.create_oval(
-                x - 17, y - 17,
-                x + 17, y + 17,
-                outline=outline,
-                width=2
+            pulse = (
+                1.0
+                if self.reduce_motion
+                else 0.5 + 0.5 * math.sin(time.perf_counter() * 3)
             )
 
+            ring_color = (
+                self.accent_color
+                if selected
+                else self.blend(MUTED, color, 0.5)
+            )
+
+            radius = 17 + pulse * 2
+
+            self.create_oval(
+                x - radius,
+                y - radius,
+                x + radius,
+                y + radius,
+                outline=ring_color,
+                width=2,
+                tags=tags
+            )
+
+        self.draw_glow(x, y, color, size)
+
+        # Outer atmosphere.
         self.create_oval(
-            x - size - 3,
-            y - size - 3,
-            x + size + 3,
-            y + size + 3,
-            outline="#263651",
-            width=2
+            x - size - 2,
+            y - size - 2,
+            x + size + 2,
+            y + size + 2,
+            outline=self.blend(BG, color, 0.75),
+            width=1,
+            tags=tags
         )
 
+        # Main planet body.
         self.create_oval(
             x - size,
             y - size,
             x + size,
             y + size,
-            fill=planet["color"],
+            fill=color,
             outline="",
             tags=tags
         )
 
-        self.create_text(
-            x,
-            y + 22,
-            text=planet["name"],
-            fill=ACCENT if selected else TEXT,
-            font=("Consolas", 9, "bold" if selected else "normal"),
+        # Surface highlight.
+        self.create_arc(
+            x - size + 2,
+            y - size + 2,
+            x + size - 2,
+            y + size - 2,
+            start=35,
+            extent=120,
+            style="arc",
+            outline="#FFFFFF",
+            width=1,
             tags=tags
         )
+
+        if self.show_labels:
+
+            label_color = (
+                color
+                if selected
+                else TEXT
+            )
+
+            label = f"{planet['icon']}  {planet['name']}"
+
+            self.create_text(
+                x,
+                y + 27,
+                text=label[:30],
+                fill=label_color,
+                font=(
+                    "Segoe UI",
+                    8,
+                    "bold" if selected or hovered else "normal"
+                ),
+                tags=tags
+            )
+
+    def draw_star_core(self, cx, cy):
+
+        pulse = (
+            0.0
+            if self.reduce_motion
+            else math.sin(time.perf_counter() * 1.8) * 2
+        )
+
+        self.draw_glow(
+            cx,
+            cy,
+            self.accent_color,
+            17 + pulse
+        )
+
+        # Outer ring.
+        self.create_oval(
+            cx - 24,
+            cy - 24,
+            cx + 24,
+            cy + 24,
+            outline=self.blend(BG, self.accent_color, 0.8),
+            width=2
+        )
+
+        # Core.
+        self.create_oval(
+            cx - 16,
+            cy - 16,
+            cx + 16,
+            cy + 16,
+            fill=self.accent_color,
+            outline=""
+        )
+
+        self.create_oval(
+            cx - 8,
+            cy - 8,
+            cx + 8,
+            cy + 8,
+            fill="#E8FFFC",
+            outline=""
+        )
+
+        # Four-point star.
+        points = [
+            cx, cy - 30,
+            cx + 3, cy - 3,
+            cx + 30, cy,
+            cx + 3, cy + 3,
+            cx, cy + 30,
+            cx - 3, cy + 3,
+            cx - 30, cy,
+            cx - 3, cy - 3
+        ]
+
+        self.create_polygon(
+            points,
+            fill=self.accent_color,
+            outline=""
+        )
+
+        self.create_text(
+            cx,
+            cy + 48,
+            text="N O R T H S T A R",
+            fill=TEXT,
+            font=("Consolas", 8, "bold")
+        )
+
+    # --------------------------------------------------
+    # CAPTURE DEVICE
+    # --------------------------------------------------
+
+    def draw_capture_device(self, cx, cy):
+
+        x = cx + 55
+        y = cy - 5
+
+        if self.emergency:
+            color = AMBER
+        elif self.active_animation:
+            color = (
+                PURPLE
+                if self.active_animation["kind"] == "ejection"
+                else self.accent_color
+            )
+        else:
+            color = "#3A6072"
+
+        self.create_oval(
+            x - 16,
+            y - 16,
+            x + 16,
+            y + 16,
+            outline=color,
+            width=2
+        )
+
+        self.create_oval(
+            x - 10,
+            y - 10,
+            x + 10,
+            y + 10,
+            fill="#172C43",
+            outline=color,
+            width=2
+        )
+
+        self.create_oval(
+            x - 4,
+            y - 4,
+            x + 4,
+            y + 4,
+            fill=color,
+            outline=""
+        )
+
+        self.create_text(
+            x,
+            y + 27,
+            text="DOCK",
+            fill=color,
+            font=("Consolas", 7, "bold")
+        )
+
+    # --------------------------------------------------
+    # ANIMATION TRAILS AND BEAMS
+    # --------------------------------------------------
 
     def draw_trail(self, trail, color):
 
         if len(trail) < 2:
             return
 
-        for i in range(1, len(trail)):
+        for index in range(1, len(trail)):
 
-            x1, y1 = trail[i - 1]
-            x2, y2 = trail[i]
+            x1, y1 = trail[index - 1]
+            x2, y2 = trail[index]
 
-            intensity = i / len(trail)
+            intensity = index / len(trail)
 
             self.create_line(
-                x1, y1, x2, y2,
-                fill=color,
-                width=max(1, 5 * intensity),
+                x1,
+                y1,
+                x2,
+                y2,
+                fill=self.blend(BG, color, intensity),
+                width=max(1, int(4 * intensity)),
                 capstyle=tk.ROUND
             )
 
@@ -428,247 +956,197 @@ class OrbitView(tk.Canvas):
         y1,
         x2,
         y2,
-        color=ACCENT,
+        color,
         intensity=1.0
     ):
 
         self.create_line(
             x1, y1, x2, y2,
-            fill=color,
-            width=12 * intensity,
+            fill=self.blend(BG, color, 0.35),
+            width=10 * intensity,
             capstyle=tk.ROUND
         )
 
         self.create_line(
             x1, y1, x2, y2,
-            fill="#347b91" if color == ACCENT else color,
-            width=6 * intensity,
+            fill=self.blend(BG, color, 0.75),
+            width=5 * intensity,
             capstyle=tk.ROUND
         )
 
         self.create_line(
             x1, y1, x2, y2,
-            fill="#eaffff",
-            width=2 * intensity,
+            fill="#E8FFFC",
+            width=1.5 * intensity,
             capstyle=tk.ROUND
-        )
-
-    # --------------------------------------------------
-    # CAPTURE DEVICE
-    # --------------------------------------------------
-
-    def draw_capture_device(self, cx, cy):
-
-        x = cx + 52
-        y = cy - 5
-
-        if self.emergency:
-
-            color = (
-                "#ffbd69"
-                if self.emergency["phase"] == "decay"
-                else "#b9a0ff"
-            )
-
-        elif self.active_animation:
-
-            color = (
-                "#b9a0ff"
-                if self.active_animation["kind"] == "ejection"
-                else ACCENT
-            )
-
-        else:
-            color = "#416b78"
-
-        self.create_oval(
-            x - 20, y - 20,
-            x + 20, y + 20,
-            outline=color,
-            width=2
-        )
-
-        for direction in (-1, 1):
-
-            self.create_line(
-                x - 24, y + direction * 14,
-                x - 12, y + direction * 7,
-                fill="#8da2c0",
-                width=3
-            )
-
-            self.create_line(
-                x + 24, y + direction * 14,
-                x + 12, y + direction * 7,
-                fill="#8da2c0",
-                width=3
-            )
-
-        self.create_oval(
-            x - 11, y - 11,
-            x + 11, y + 11,
-            fill="#172d3c",
-            outline=color,
-            width=2
-        )
-
-        self.create_oval(
-            x - 4, y - 4,
-            x + 4, y + 4,
-            fill=color,
-            outline=""
-        )
-
-        self.create_text(
-            x,
-            y + 31,
-            text="CAPTURE",
-            fill=color,
-            font=("Consolas", 7, "bold")
         )
 
     # --------------------------------------------------
     # CAPTURE ANIMATION
     # --------------------------------------------------
 
-    def get_capture_position(
-        self, planet, cx, cy, max_radius
-    ):
-
-        radius = (
-            self.get_orbit_radius(planet, max_radius)
-            + max_radius * 0.30
-        )
-
-        angle = -0.95
-
-        return (
-            cx + radius * math.cos(angle),
-            cy + radius * math.sin(angle)
-        )
-
-    def capture_position(
-        self, animation, progress, cx, cy, max_radius
-    ):
-
-        planet = animation["planet"]
-
-        orbit_radius = self.get_orbit_radius(
-            planet, max_radius
-        )
-
-        start_radius = orbit_radius + max_radius * 0.30
-
-        # Exponential radial decay.
-        curve = self.exponential_curve(progress)
-
-        radius = self.lerp(
-            start_radius,
-            orbit_radius,
-            curve
-        )
-
-        start_angle = -0.95
-
-        # A little more than half a revolution while
-        # the planet spirals inward.
-        end_angle = start_angle + math.pi * 1.15
-
-        angle = self.lerp(
-            start_angle,
-            end_angle,
-            curve
-        )
-
-        x = cx + radius * math.cos(angle)
-        y = cy + radius * math.sin(angle)
-
-        return x, y, math.degrees(end_angle)
-
     def draw_capture_animation(
-        self, animation, cx, cy, max_radius
+        self,
+        animation,
+        cx,
+        cy,
+        max_radius
     ):
 
         planet = animation["planet"]
-        phase = animation["phase"]
         progress = animation["progress"]
 
-        device_x = cx + 52
+        device_x = cx + 55
         device_y = cy - 5
 
-        if phase == "incoming":
+        if animation["phase"] == "incoming":
 
-            target_x, target_y = self.get_capture_position(
-                planet, cx, cy, max_radius
+            target_radius = (
+                self.get_orbit_radius(planet, max_radius)
+                + max_radius * 0.30
             )
+
+            target_angle = -0.85
+
+            target_x = cx + target_radius * math.cos(target_angle)
+            target_y = cy + target_radius * math.sin(target_angle)
 
             t = self.ease_out(progress)
 
-            start_x = self.winfo_width() + 50
-            start_y = cy - max_radius * 0.42
+            x = self.lerp(
+                self.winfo_width() + 40,
+                target_x,
+                t
+            )
 
-            x = self.lerp(start_x, target_x, t)
-            y = self.lerp(start_y, target_y, t)
-
-            self.create_line(
-                x + 85, y - 15,
-                x, y,
-                fill="#347b91",
-                width=6,
-                smooth=True,
-                capstyle=tk.ROUND
+            y = self.lerp(
+                cy - max_radius * 0.55,
+                target_y,
+                t
             )
 
             self.create_line(
-                x + 48, y - 8,
-                x, y,
-                fill="#a2eaff",
-                width=2,
-                smooth=True
+                x + 55,
+                y - 10,
+                x,
+                y,
+                fill=self.blend(BG, planet["color"], 0.7),
+                width=5,
+                capstyle=tk.ROUND
             )
 
             self.draw_planet(planet, x, y)
 
             return
 
-        # Three-second locked-beam insertion.
-        x, y, end_angle = self.capture_position(
-            animation, progress, cx, cy, max_radius
+        radius = self.get_orbit_radius(
+            planet,
+            max_radius
         )
 
-        animation["end_angle"] = end_angle
+        t = self.ease_in_out(progress)
 
-        pulse = 0.82 + 0.18 * math.sin(
-            progress * math.pi * 12
+        start_radius = radius + max_radius * 0.30
+        current_radius = self.lerp(
+            start_radius,
+            radius,
+            t
+        )
+
+        start_angle = -0.85
+        end_angle = start_angle + math.pi * 1.2
+
+        angle = self.lerp(
+            start_angle,
+            end_angle,
+            t
+        )
+
+        x = cx + current_radius * math.cos(angle)
+        y = cy + current_radius * math.sin(angle)
+
+        animation["end_angle"] = math.degrees(end_angle)
+
+        pulse = (
+            0.85
+            if self.reduce_motion
+            else 0.7 + 0.3 * math.sin(progress * math.pi * 12)
         )
 
         self.draw_beam(
-            device_x, device_y,
-            x, y,
-            ACCENT,
+            device_x,
+            device_y,
+            x,
+            y,
+            planet["color"],
             pulse
         )
 
         animation["trail"].append((x, y))
 
-        if len(animation["trail"]) > 90:
+        if len(animation["trail"]) > 45:
             animation["trail"].pop(0)
 
         self.draw_trail(
             animation["trail"],
-            "#347b91"
+            planet["color"]
         )
 
-        # Capture impact ring
-        ring_size = 12 + 5 * math.sin(progress * math.pi * 10)
+        self.draw_planet(planet, x, y)
 
-        self.create_oval(
-            x - ring_size, y - ring_size,
-            x + ring_size, y + ring_size,
-            outline=ACCENT,
-            width=2
+    # --------------------------------------------------
+    # EJECTION ANIMATION
+    # --------------------------------------------------
+
+    def draw_ejection_animation(
+        self,
+        animation,
+        cx,
+        cy,
+        max_radius
+    ):
+
+        planet = animation["planet"]
+        progress = self.ease_in_out(animation["progress"])
+
+        radius = self.get_orbit_radius(
+            planet,
+            max_radius
         )
 
+        angle = math.radians(animation["start_angle"])
+
+        outer_radius = radius + max_radius * 0.45
+
+        current_radius = self.lerp(
+            radius,
+            outer_radius,
+            progress
+        )
+
+        current_angle = angle - math.pi * 0.55 * progress
+
+        x = cx + current_radius * math.cos(current_angle)
+        y = cy + current_radius * math.sin(current_angle)
+
+        device_x = cx + 55
+        device_y = cy - 5
+
+        self.draw_beam(
+            device_x,
+            device_y,
+            x,
+            y,
+            PURPLE,
+            0.9
+        )
+
+        animation["trail"].append((x, y))
+
+        if len(animation["trail"]) > 45:
+            animation["trail"].pop(0)
+
+        self.draw_trail(animation["trail"], PURPLE)
         self.draw_planet(planet, x, y)
 
     # --------------------------------------------------
@@ -677,16 +1155,14 @@ class OrbitView(tk.Canvas):
 
     def start_instability(self):
 
-        if not self.instability_enabled:
-            return
-
-        if not self.planets:
-            return
-
-        if self.active_animation or self.animation_queue:
-            return
-
-        if self.emergency:
+        if (
+            not self.instability_enabled
+            or self.reduce_motion
+            or not self.planets
+            or self.active_animation
+            or self.animation_queue
+            or self.emergency
+        ):
             return
 
         planet = self.random_generator.choice(self.planets)
@@ -699,49 +1175,51 @@ class OrbitView(tk.Canvas):
             "trail": []
         }
 
-    def get_emergency_position(
-        self, emergency, cx, cy, max_radius
+    def emergency_position(
+        self,
+        emergency,
+        cx,
+        cy,
+        max_radius
     ):
 
         planet = emergency["planet"]
 
         orbit_radius = self.get_orbit_radius(
-            planet, max_radius
+            planet,
+            max_radius
         )
 
         start_angle = math.radians(
             emergency["start_angle"]
         )
 
-        if emergency["phase"] == "decay":
+        progress = self.ease_in_out(
+            emergency["progress"]
+        )
 
-            t = self.ease_in_out(emergency["progress"])
+        if emergency["phase"] == "decay":
 
             radius = self.lerp(
                 orbit_radius,
                 orbit_radius - max_radius * 0.14,
-                t
+                progress
             )
 
-            angle = start_angle + 0.30 * t
+            angle = start_angle + 0.32 * progress
 
         else:
 
-            t = self.ease_out(emergency["progress"])
-
-            drift_radius = orbit_radius - max_radius * 0.14
-            drift_angle = start_angle + 0.30
-
             radius = self.lerp(
-                drift_radius,
+                orbit_radius - max_radius * 0.14,
                 orbit_radius,
-                t
+                progress
             )
 
             angle = self.lerp(
-                drift_angle,
-                drift_angle + 0.12,
-                t
+                start_angle + 0.32,
+                start_angle + 0.44,
+                progress
             )
 
         return (
@@ -758,35 +1236,31 @@ class OrbitView(tk.Canvas):
             return
 
         planet = emergency["planet"]
-        phase = emergency["phase"]
 
-        x, y, _ = self.get_emergency_position(
-            emergency, cx, cy, max_radius
+        x, y, _ = self.emergency_position(
+            emergency,
+            cx,
+            cy,
+            max_radius
         )
 
-        device_x = cx + 52
-        device_y = cy - 5
-
-        if phase == "decay":
-            color = "#ffbd69"
-        else:
-            color = "#b9a0ff"
-
-        pulse = 0.8 + 0.2 * math.sin(
-            emergency["progress"] * math.pi * 10
+        color = (
+            AMBER
+            if emergency["phase"] == "decay"
+            else PURPLE
         )
 
-        # The device remains locked onto the unstable planet.
         self.draw_beam(
-            device_x, device_y,
-            x, y,
-            color,
-            pulse
+            cx + 55,
+            cy - 5,
+            x,
+            y,
+            color
         )
 
         emergency["trail"].append((x, y))
 
-        if len(emergency["trail"]) > 90:
+        if len(emergency["trail"]) > 45:
             emergency["trail"].pop(0)
 
         self.draw_trail(
@@ -797,8 +1271,8 @@ class OrbitView(tk.Canvas):
         self.draw_planet(planet, x, y)
 
         label = (
-            "ORBITAL DECAY"
-            if phase == "decay"
+            "ORBITAL INSTABILITY"
+            if emergency["phase"] == "decay"
             else "ORBITAL RECOVERY"
         )
 
@@ -811,109 +1285,6 @@ class OrbitView(tk.Canvas):
         )
 
     # --------------------------------------------------
-    # EJECTION ANIMATION
-    # --------------------------------------------------
-
-    def ejection_position(
-        self, animation, cx, cy, max_radius
-    ):
-
-        planet = animation["planet"]
-
-        orbit_radius = self.get_orbit_radius(
-            planet, max_radius
-        )
-
-        phase = animation["phase"]
-        progress = animation["progress"]
-
-        start_angle = math.radians(
-            animation["start_angle"]
-        )
-
-        if phase == "ejection_lock":
-
-            x = cx + orbit_radius * math.cos(start_angle)
-            y = cy + orbit_radius * math.sin(start_angle)
-
-        elif phase == "ejection_spiral":
-
-            t = self.ease_in_out(progress)
-
-            outer_radius = orbit_radius + max_radius * 0.30
-
-            radius = self.lerp(
-                orbit_radius,
-                outer_radius,
-                t
-            )
-
-            angle = start_angle - math.pi * 0.75 * t
-
-            x = cx + radius * math.cos(angle)
-            y = cy + radius * math.sin(angle)
-
-        else:
-
-            # Final launch: accelerate out of the canvas.
-            start_radius = orbit_radius + max_radius * 0.30
-            start_angle = start_angle - math.pi * 0.75
-
-            start_x = cx + start_radius * math.cos(start_angle)
-            start_y = cy + start_radius * math.sin(start_angle)
-
-            target_x = self.winfo_width() + 150
-            target_y = start_y - max_radius * 0.65
-
-            t = self.ease_out(progress)
-
-            x = self.lerp(start_x, target_x, t)
-            y = self.lerp(start_y, target_y, t)
-
-        return x, y
-
-    def draw_ejection_animation(
-        self, animation, cx, cy, max_radius
-    ):
-
-        planet = animation["planet"]
-        phase = animation["phase"]
-        progress = animation["progress"]
-
-        x, y = self.ejection_position(
-            animation, cx, cy, max_radius
-        )
-
-        device_x = cx + 52
-        device_y = cy - 5
-
-        color = "#b9a0ff"
-
-        pulse = 0.8 + 0.2 * math.sin(
-            progress * math.pi * 10
-        )
-
-        # Purple beam stays locked throughout the ejection.
-        self.draw_beam(
-            device_x, device_y,
-            x, y,
-            color,
-            pulse
-        )
-
-        animation["trail"].append((x, y))
-
-        if len(animation["trail"]) > 100:
-            animation["trail"].pop(0)
-
-        self.draw_trail(
-            animation["trail"],
-            color
-        )
-
-        self.draw_planet(planet, x, y)
-
-    # --------------------------------------------------
     # MAIN RENDERING
     # --------------------------------------------------
 
@@ -924,8 +1295,10 @@ class OrbitView(tk.Canvas):
         width = self.winfo_width()
         height = self.winfo_height()
 
-        if width < 50 or height < 50:
+        if width < 80 or height < 80:
             return
+
+        self.draw_background(width, height)
 
         cx = width / 2
         cy = height / 2
@@ -933,7 +1306,8 @@ class OrbitView(tk.Canvas):
         max_radius = min(width, height) * 0.43
 
         used_rings = {
-            planet["ring"] for planet in self.planets
+            planet["ring"]
+            for planet in self.planets
         }
 
         if self.active_animation:
@@ -944,54 +1318,43 @@ class OrbitView(tk.Canvas):
         for ring in sorted(used_rings):
 
             radius = max_radius * (
-                0.30 + 0.14 * ring
+                0.25 + 0.135 * ring
             )
 
-            self.create_oval(
-                cx - radius,
-                cy - radius,
-                cx + radius,
-                cy + radius,
-                outline="#263651",
-                width=1
+            active = any(
+                planet["ring"] == ring
+                and planet["path"] == self.selected_path
+                for planet in self.planets
             )
 
-        # Central NorthStar
-        star_size = 25
+            self.draw_orbit(
+                cx,
+                cy,
+                radius,
+                active
+            )
 
-        self.create_oval(
-            cx - star_size,
-            cy - star_size,
-            cx + star_size,
-            cy + star_size,
-            fill=ACCENT,
-            outline=""
-        )
-
-        self.create_text(
-            cx,
-            cy + 38,
-            text="NORTHSTAR",
-            fill=TEXT,
-            font=("Consolas", 10, "bold")
-        )
-
+        # Draw central star and dock.
+        self.draw_star_core(cx, cy)
         self.draw_capture_device(cx, cy)
 
-        # Hide the planet currently being recovered.
+        # Normal planets.
         emergency_planet = (
             self.emergency["planet"]
-            if self.emergency else None
+            if self.emergency
+            else None
         )
 
-        # Normal planets
         for planet in self.planets:
 
             if planet is emergency_planet:
                 continue
 
             x, y = self.get_orbit_position(
-                planet, cx, cy, max_radius
+                planet,
+                cx,
+                cy,
+                max_radius
             )
 
             path = planet["path"]
@@ -1006,54 +1369,72 @@ class OrbitView(tk.Canvas):
                 tags=(tag,)
             )
 
-        # Special animations
+        # Emergency event.
         if self.emergency:
-            self.draw_emergency(cx, cy, max_radius)
+            self.draw_emergency(
+                cx,
+                cy,
+                max_radius
+            )
 
+        # Capture or ejection.
         if self.active_animation:
 
             animation = self.active_animation
-            kind = animation["kind"]
 
-            if kind == "capture":
+            if animation["kind"] == "capture":
 
                 self.draw_capture_animation(
-                    animation, cx, cy, max_radius
+                    animation,
+                    cx,
+                    cy,
+                    max_radius
                 )
 
-            elif kind == "ejection":
+            elif animation["kind"] == "ejection":
 
                 self.draw_ejection_animation(
-                    animation, cx, cy, max_radius
+                    animation,
+                    cx,
+                    cy,
+                    max_radius
                 )
 
+        # Empty state.
         if (
             not self.planets
             and not self.active_animation
+            and not self.animation_queue
             and not self.emergency
         ):
 
             self.create_text(
                 cx,
-                cy + 75,
-                text="Your projects will orbit here.",
+                cy + 95,
+                text="NO REGISTERED PROJECTS",
                 fill=MUTED,
-                font=("Segoe UI", 10)
+                font=("Consolas", 9, "bold")
+            )
+
+            self.create_text(
+                cx,
+                cy + 115,
+                text="Add a project to initialize your orbit.",
+                fill="#526783",
+                font=("Segoe UI", 8)
             )
 
     # --------------------------------------------------
     # ANIMATION UPDATES
     # --------------------------------------------------
 
-    def update_capture(self, animation):
+    def update_capture(self, animation, delta):
 
         phase = animation["phase"]
 
         if phase == "incoming":
 
-            animation["progress"] += (
-                FRAME_TIME / 1000 / INCOMING_TIME
-            )
+            animation["progress"] += delta / INCOMING_TIME
 
             if animation["progress"] >= 1:
 
@@ -1063,49 +1444,19 @@ class OrbitView(tk.Canvas):
 
         elif phase == "insertion":
 
-            animation["progress"] += (
-                FRAME_TIME / 1000 / INSERTION_TIME
-            )
+            animation["progress"] += delta / INSERTION_TIME
 
             if animation["progress"] >= 1:
                 self.finish_animation()
 
-    def update_ejection(self, animation):
+    def update_ejection(self, animation, delta):
 
-        phase = animation["phase"]
+        animation["progress"] += delta / EJECTION_TIME
 
-        if phase == "ejection_lock":
+        if animation["progress"] >= 1:
+            self.finish_animation()
 
-            animation["progress"] += (
-                FRAME_TIME / 1000 / EJECTION_LOCK_TIME
-            )
-
-            if animation["progress"] >= 1:
-
-                animation["phase"] = "ejection_spiral"
-                animation["progress"] = 0.0
-
-        elif phase == "ejection_spiral":
-
-            animation["progress"] += (
-                FRAME_TIME / 1000 / EJECTION_SPIRAL_TIME
-            )
-
-            if animation["progress"] >= 1:
-
-                animation["phase"] = "ejection_launch"
-                animation["progress"] = 0.0
-
-        elif phase == "ejection_launch":
-
-            animation["progress"] += (
-                FRAME_TIME / 1000 / EJECTION_LAUNCH_TIME
-            )
-
-            if animation["progress"] >= 1:
-                self.finish_animation()
-
-    def update_emergency(self):
+    def update_emergency(self, delta):
 
         emergency = self.emergency
 
@@ -1114,9 +1465,7 @@ class OrbitView(tk.Canvas):
 
         if emergency["phase"] == "decay":
 
-            emergency["progress"] += (
-                FRAME_TIME / 1000 / RECOVERY_DECAY_TIME
-            )
+            emergency["progress"] += delta / RECOVERY_TIME
 
             if emergency["progress"] >= 1:
 
@@ -1126,15 +1475,13 @@ class OrbitView(tk.Canvas):
 
         elif emergency["phase"] == "boost":
 
-            emergency["progress"] += (
-                FRAME_TIME / 1000 / RECOVERY_BOOST_TIME
-            )
+            emergency["progress"] += delta / RECOVERY_TIME
 
             if emergency["progress"] >= 1:
 
                 planet = emergency["planet"]
 
-                _, _, final_angle = self.get_emergency_position(
+                _, _, final_angle = self.emergency_position(
                     emergency,
                     self.winfo_width() / 2,
                     self.winfo_height() / 2,
@@ -1151,46 +1498,58 @@ class OrbitView(tk.Canvas):
 
     def animate(self):
 
-        # Advance ordinary planets.
-        for planet in self.planets:
+        now = time.perf_counter()
 
-            if (
-                self.emergency
-                and planet is self.emergency["planet"]
-            ):
-                continue
+        delta = min(
+            now - self.last_frame,
+            0.05
+        )
 
-            planet["angle"] = (
-                planet["angle"] + planet["speed"]
-            ) % 360
+        self.last_frame = now
 
-        # Only one major animation runs at a time.
+        if not self.reduce_motion:
+
+            for planet in self.planets:
+
+                if (
+                    self.emergency
+                    and planet is self.emergency["planet"]
+                ):
+                    continue
+
+                planet["angle"] = (
+                    planet["angle"]
+                    + planet["speed"] * delta * 60
+                ) % 360
+
         if self.active_animation:
 
             animation = self.active_animation
 
             if animation["kind"] == "capture":
-                self.update_capture(animation)
+                self.update_capture(animation, delta)
 
             elif animation["kind"] == "ejection":
-                self.update_ejection(animation)
+                self.update_ejection(animation, delta)
 
         elif self.emergency:
 
-            self.update_emergency()
+            self.update_emergency(delta)
 
         else:
 
-            # Random instability events.
-            if self.instability_enabled and self.planets:
+            if (
+                self.instability_enabled
+                and not self.reduce_motion
+                and self.planets
+            ):
 
-                self.anomaly_timer -= FRAME_TIME / 1000
+                self.anomaly_timer -= delta
 
                 if self.anomaly_timer <= 0:
                     self.start_instability()
 
             elif not self.planets:
-
                 self.anomaly_timer = self.next_anomaly_time()
 
         self.draw_system()
@@ -1202,7 +1561,7 @@ if __name__ == "__main__":
 
     root = tk.Tk()
     root.title("NorthStar — Project Orbit")
-    root.geometry("800x600")
+    root.geometry("1000x700")
     root.configure(bg=BG)
 
     orbit = OrbitView(root)
